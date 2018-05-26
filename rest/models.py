@@ -122,7 +122,7 @@ class Beacon(db.Model):
         'Trip', secondary=Beacon_has_Trip, backref=db.backref('beacons', lazy=False))
 
     def __repr__(self):
-        return '<Beacon {}>'.format(self.name)
+        return '<Beacon {} : {}>'.format(self.name,self.idBeacon)
 
     def __init__(self, name, latitude, longitude, iconUrl, qrCodeID):
         self.name = name
@@ -146,8 +146,8 @@ beacons_schema = BeaconSchema(many=True)
 class Riddle(db.Model):
     __tablename__ = 'Riddle'
     idRiddle = db.Column(db.Integer, primary_key=True)
-    statement = db.Column(db.String(45), nullable=False)
-    answer = db.Column(db.String(45), nullable=False)
+    statement = db.Column(db.String(512), nullable=False)
+    answer = db.Column(db.String(256), nullable=False)
     GameMode = db.Column(db.Integer, nullable=True)
 
     def __repr__(self):
