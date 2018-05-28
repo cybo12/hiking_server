@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from db import *
 from flask_restplus import inputs
+from sqlalchemy.orm import relationship
 
 
 class Player(db.Model):
@@ -27,7 +28,8 @@ class Player(db.Model):
 class PlayerSchema(ma.Schema):
 
     class Meta:
-        fields = ('idPlayer', 'pseudonyme', 'Team_idTeam', 'token')
+        fields = ('idPlayer', 'pseudonyme', 'Team_idTeam',
+                  'token', 'latitude', 'longitude')
 
 
 player_schema = PlayerSchema()
@@ -74,7 +76,8 @@ Beacon_has_Trip = db.Table('Beacon_has_Trip',
                            db.Column('Beacon_idBeacon', db.Integer, db.ForeignKey(
                                'Beacon.idBeacon'), primary_key=True),
                            db.Column('Trip_idTrip', db.Integer, db.ForeignKey(
-                               'Trip.idTrip'), primary_key=True)
+                               'Trip.idTrip'), primary_key=True),
+                           db.Column('ind', db.Integer, nullable=False)
                            )
 
 
@@ -86,6 +89,8 @@ class Trip(db.Model):
     heighDifference = db.Column(db.Float, nullable=False)
     Team_idTeam = db.Column(db.Integer, db.ForeignKey(
         'Team.idTeam'), nullable=False)
+    beacons = db.relationship(
+        'Beacon', secondary=Beacon_has_Trip, backref=db.backref('trips', lazy=False), order_by=Beacon_has_Trip.c.ind)
 
     def __repr__(self):
         return '<Trip {}>'.format(self.idTrip)
@@ -108,6 +113,7 @@ trip_schema = TripSchema()
 trips_schema = TripSchema(many=True)
 
 
+
 class Beacon(db.Model):
     __tablename__ = 'Beacon'
     idBeacon = db.Column(db.Integer, primary_key=True)
@@ -118,11 +124,9 @@ class Beacon(db.Model):
     Riddle_idRiddle = db.Column(db.Integer, db.ForeignKey(
         'Riddle.idRiddle'), nullable=True)
     qrCodeID = db.Column(db.String(64), nullable=True)
-    trips = db.relationship(
-        'Trip', secondary=Beacon_has_Trip, backref=db.backref('beacons', lazy=False))
 
     def __repr__(self):
-        return '<Beacon {} : {}>'.format(self.name,self.idBeacon)
+        return '<Beacon name :{} id: {} >'.format(self.name, self.idBeacon)
 
     def __init__(self, name, latitude, longitude, iconUrl, qrCodeID):
         self.name = name
@@ -197,7 +201,7 @@ class SettingsSchema(ma.Schema):
 
     class Meta:
         fields = ('idSettings', 'tresholdShrink', 'mapViewEnable',
-                  'timerRiddle', 'lives', 'enableNextBeaconVisibility', 'center_x','center_y','radius')
+                  'timerRiddle', 'lives', 'enableNextBeaconVisibility', 'center_x', 'center_y', 'radius')
 
 
 setting_schema = SettingsSchema()
