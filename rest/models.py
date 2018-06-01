@@ -113,7 +113,6 @@ trip_schema = TripSchema()
 trips_schema = TripSchema(many=True)
 
 
-
 class Beacon(db.Model):
     __tablename__ = 'Beacon'
     idBeacon = db.Column(db.Integer, primary_key=True)
@@ -239,6 +238,7 @@ class Game(db.Model):
     PlayerCode = db.Column(db.String(45), nullable=False)
     GameMasterCode = db.Column(db.String(45), nullable=False)
     gameStartedTime = db.Column(db.Date, nullable=True)
+    gameEndedTime = db.Column(db.Date, nullable=True)
 
     def __repr__(self):
         return '<Game {}>'.format(self.name)
@@ -257,10 +257,12 @@ class GameSchema(ma.Schema):
 
     class Meta:
         fields = ('idGame', 'name', 'GameMode', 'isStarted',
-                  'Settings_idSettings', 'PlayerCode', 'GameMasterCode')
+                  'Settings_idSettings', 'PlayerCode', 'GameMasterCode','gameStartedTime','gameEndedTime')
 
 
 game_schema = GameSchema()
 games_schema = GameSchema(many=True)
+
+
 
 db.create_all()

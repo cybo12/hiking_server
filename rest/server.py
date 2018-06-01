@@ -34,23 +34,49 @@ def get_games():
     return games_schema.jsonify(game)
 
 
+@app.route("/share/<playercode>")
+def share(playercode):
+    game = Game.query.filter_by(PlayerCode=playercode).first()
+    if game is not None:
+        teams = Team.query.filter_by(
+            Game_idGame=game.idGame).order_by(Team.score.desc()).all()
+        date = game.gameStartedTime.strftime("%d/%m/%y")
+        total = len(teams)
+        if game.gameEndedTime is None:
+            timeStr = "Still active"
+        else:
+            time = game.gameEndedTime - game.gameStartedTime
+            timeStr = str(datetime.timedelta(seconds=time.seconds))
+        print timeStr
+        ret = render_template('share.html', teams=teams,
+                              game=game, time=timeStr, date=date, total=total)
+    else:
+        ret = make_response("GAME_DOESNT_EXIST", 403)
+    return ret
+
+
+@app.route("/teams/<id>", methods=["GET"])
+def get_teams(id):
+    teams = Team.query.filter_by(
+        Game_idGame=id).order_by(Team.score.desc()).all()
+    return teams_schema.jsonify(teams)
+
+
 @app.route("/games/<playercode>", methods=["GET"])
 def get_game(playercode):
-    game = Game.query.filter_by(PlayerCode=playercode).first()
+    game = Game.query.filter_by(PlayerCode=playercode).first_or_404()
     team = Team.query.filter_by(Game_idGame=game.idGame).first_or_404()
-    trip = Trip.query.filter_by(Team_idTeam=team.idTeam).first()
+    trip = Trip.query.filter_by(Team_idTeam=team.idTeam).first_or_404()
     print trip.beacons
     for x in trip.beacons:
         print x.trips
     return game_schema.jsonify(game)
 
+
 # get GeoJson of the game
-
-
 @app.route("/map/<id_g>", methods=["GET"])
 def map(id_g):
     game = Game.query.get(id_g)
-    settings = Settings.query.get(game.Settings_idSettings)
     teams = Team.query.filter_by(Game_idGame=game.idGame).all()
     beacons_get = []
     beacons = []
@@ -75,7 +101,7 @@ def map(id_g):
 
 @app.errorhandler(404)
 def not_found(error):
-    resp = make_response(render_template('error.html'), 404)
+    resp = make_response(error, 403)
     resp.headers['Error'] = error
     return resp
 
@@ -124,8 +150,8 @@ def shrink(idGame):
     a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     distance = R * c
-    # diamètre en KM ramené au rayon en mètres + 10%
-    settings.radius = (distance * 0.55) * 1000
+    # diamètre en KM ramené au rayon en mètres +100%
+    settings.radius = (distance) * 1000
     db.session.commit()
 
 
@@ -231,11 +257,11 @@ def add_player_team():
                 response = make_response(
                     ret, 200, {'Content-Type': "application/json"})
             else:
-                response = make_response("pseudo déjà pris", 403)
+                response = make_response("PSEUDO_TAKEN", 403)
         else:
-            response = make_response("la team n'existe pas", 403)
+            response = make_response("TEAM_INVALID", 403)
     else:
-        response = make_response("la game n'existe pas", 403)
+        response = make_response("GAME_DOESNT_EXIST", 403)
     return response
 
 # create the game with all parameter given and return player's and admin's
@@ -244,6 +270,7 @@ def add_player_team():
 
 @app.route("/game", methods=["POST"])
 def add_game():
+    print request.data
     try:
         json_handle = json.loads(request.data)
     except (ValueError, KeyError, TypeError):
@@ -281,8 +308,6 @@ def add_game():
             query = Beacon_has_Trip.update().where(Beacon_has_Trip.c.Trip_idTrip == trip.idTrip).where(
                 Beacon_has_Trip.c.Beacon_idBeacon == beacon.idBeacon).values(ind=index)
             db.session.execute(query)
-            print query
-            print c
             index += 1
             db.session.commit()
     settings = Settings(tresholdShrink=json_handle['tresholdShrink'],
@@ -324,26 +349,27 @@ def confirmPoint():
             PlayerCode=json_handle['playercode']).first()
         team = Team.query.filter_by(
             name=json_handle['nameTeam'], Game_idGame=game.idGame).first()
-        team.lives = json_handle['lives']
-        if json_handle['lives'] == 0:
-            team.Checkpoint = len(trip.beacons) - 1
-            payload = getPoint(trip.idTrip, team.Checkpoint)
+        if json_handle['lives'] < team.lives:
+            team.lives = json_handle['lives']
+            db.session.commit()
+        if json_handle['nbBeacon'] < team.Checkpoint:
+            payload = getPoint(trip.idTrip, team.Checkpoint + 1)
         else:
             team.Checkpoint += 1
             db.session.commit()
             if team.Checkpoint <= len(trip.beacons):
                 payload = getPoint(trip.idTrip, team.Checkpoint)
-        db.session.commit()
-        players = Player.query.filter_by(Team_idTeam=team.idTeam).all()
-        for p in players:
-            print p.pseudonyme
-            if p.token is None:
-                if(p.pseudonyme != json_handle['namePlayer']):
-                    data = dict()
-                    data['confirmPoint'] = "true"
-                    data['lives'] = team.lives
-                    r = firebase(p.idPlayer, data)
-                    print r.content
+            players = Player.query.filter_by(Team_idTeam=team.idTeam).all()
+            for p in players:
+                if p.token is not None:
+                    if(p.pseudonyme != json_handle['namePlayer']):
+                        data = dict()
+                        data['confirmPoint'] = "true"
+                        data['lives'] = team.lives
+                        message=dict()
+                        message['title']="Point confirmed !"
+                        r = firebase(p.idPlayer, data,message)
+                        print r.content
         response = make_response(
             payload, 200, {'Content-Type': "application/json"})
         db.session.commit()
@@ -354,19 +380,86 @@ def confirmPoint():
 # request for launch message from Firebase
 
 
-def firebase(idplayer, data):
+def firebase(idplayer, data, body=None):
+    if body is None:
+        data['body'] = "x"
+        data['tilte'] = "x"
+        body = data
     player = Player.query.get(idplayer)
     headers = {'Authorization': 'key=AAAAwixAe04:APA91bEhaFFRoy9VpP7n2w9WjyaahFuRZCC_VPtHEo6DMrnN_gGVhMX-e9M6u0V_Kj9J7TKSlLiHRt2K6QhIgixHmJAwrVCR74WfsX-52QsWAA2jSEcip10JPahXgwced4Ep5H5V6l57',
                'Cache-Control': 'no-cache', 'Content-Type': 'application/json'}
     payload = ObjDict()
     payload.to = player.token
-    payload.notification = {
-        "body": "hello", "title": "Point confirmed !"}
-    payload.data = data
+    payload.notification = body
+    if data is not None:
+        payload.data = data
     payload = json.dumps(payload)
     r = requests.post(
         'https://fcm.googleapis.com/fcm/send', data=payload, headers=headers)
     return r
+
+
+@app.route("/message", methods=['POST'])
+def sendMsg():
+    try:
+        json_handle = json.loads(request.data)
+    except (ValueError, KeyError, TypeError):
+        print "JSON format error"
+    game = Game.query.filter_by(GameMasterCode=json_handle['code']).first()
+    if game:
+        team = Team.query.filter_by(
+            name=json_handle['nameTeam'], Game_idGame=game.idGame).first()
+        if team:
+            data = dict()
+            data['messageTeam'] = True
+            for p in team.players:
+                if p.token is not None:
+                    r = firebase(p.idPlayer, data, json_handle['message'])
+                    print r.content
+            response = make_response("OK", 200)
+        else:
+            response = make_response("TEAM_INVALID", 403)
+    else:
+        response = make_response("GAME_DOESNT_EXIST", 403)
+    return response
+
+
+# change life ingame
+@app.route("/decrementlife", methods=['PUT'])
+def decrementlife():
+    try:
+        json_handle = json.loads(request.data)
+    except (ValueError, KeyError, TypeError):
+        print "JSON format error"
+    game = Game.query.filter_by(PlayerCode=json_handle['playercode']).first()
+    if game:
+        team = Team.query.filter_by(
+            name=json_handle['nameTeam'], Game_idGame=game.idGame).first()
+        if team:
+            players = Player.query.filter_by(Team_idTeam=team.idTeam).all()
+            team.lives -= 1
+            data = dict()
+            data['decrementLife'] = "true"
+            data['lives'] = team.lives
+            db.session.commit()
+            if players:
+                for p in players:
+                    if p.token is not None:
+                        if(p.pseudonyme != json_handle['namePlayer']):
+                            title=dict()
+                            title['title']="you lost one live"
+                            firebase(p.idPlayer, data,title)
+                ret = dict()
+                ret['success'] = True
+                ret = json.dumps(ret)
+                response = make_response(ret, 200)
+            else:
+                response = make_response("PLAYER_DOESNT_EXIST", 403)
+        else:
+            response = make_response("TEAM_INVALID", 403)
+    else:
+        response = make_response("GAME_DOESNT_EXIST", 403)
+    return response
 
 
 # return the lastpoint
@@ -387,6 +480,8 @@ def lastpoint():
         response = ret
     return response
 
+# get id of trip with error handling
+
 
 def getTrip(playercode, nameTeam):
     game = Game.query.filter_by(PlayerCode=playercode).first()
@@ -397,16 +492,17 @@ def getTrip(playercode, nameTeam):
             trip = Trip.query.filter_by(Team_idTeam=team.idTeam).first()
             response = trip.idTrip
         else:
-            response = make_response("la team n'existe pas", 403)
+            response = make_response("TEAM_INVALID", 403)
     else:
-        response = make_response("la game n'existe pas", 403)
+        response = make_response("GAME_DOESNT_EXIST", 403)
     return response
 # get only the essential data for players including Beacon and Riddle
 
 
 def getPoint(idTrip, Checkpoint):
     trip = Trip.query.get(idTrip)
-    riddle = Riddle.query.get(trip.beacons[Checkpoint].Riddle_idRiddle)
+    team = Team.query.get(trip.Team_idTeam)
+    game = Game.query.get(team.Game_idGame)
     test = Checkpoint + 1
     check = (test == len(trip.beacons))
     beacon = trip.beacons[Checkpoint]
@@ -418,9 +514,13 @@ def getPoint(idTrip, Checkpoint):
     ret['iconURL'] = beacon.iconUrl
     ret['qrCodeID'] = beacon.qrCodeID
     ret['lastBeacon'] = check
-    if riddle is not None:
+    if game.GameMode != 1:
+        riddle = Riddle.query.get(trip.beacons[Checkpoint].Riddle_idRiddle)
         ret['statement'] = riddle.statement
         ret['answer'] = riddle.answer
+    else:
+        ret['statement'] = ''
+        ret['answer'] = ''
     ret = jsonify(ret)
     response = make_response(ret, 200, {'Content-Type': "application/json"})
     return response
@@ -456,6 +556,7 @@ def nextpoint():
     ret = getTrip(json_handle['playercode'], json_handle['nameTeam'])
     if isinstance(ret, int):
         trip = Trip.query.get(ret)
+        team = Team.query.filter_by(name=json_handle['nameTeam']).first()
         payload = getPoint(trip.idTrip, team.Checkpoint)
         response = make_response(
             payload, 200, {'Content-Type': "application/json"})
@@ -475,22 +576,30 @@ def end():
     game = Game.query.filter_by(PlayerCode=json_handle['playercode']).first()
     team = Team.query.filter_by(
         Game_idGame=game.idGame, name=json_handle['name']).first()
-    teams = Team.query.filter_by(
-        Game_idGame=game.idGame).order_by("score desc").all()
-    classement = 1
-    time = datetime.datetime.now() - game.gameStartedTime
-    for t in teams:
-        if t == team:
-            break
-        else:
-            classement += 1
-    ret = dict()
-    ret['score'] = team.score
-    ret['totalTeams'] = len(teams)
-    ret['classement'] = classement
-    ret['time'] = str(time)[:7]
-    ret = json.dumps(ret)
-    response = make_response(ret, 200, {'Content-Type': "application/json"})
+    if team:
+        teams = Team.query.filter_by(
+            Game_idGame=game.idGame).order_by(Team.score.desc()).all()
+        classement = 1
+        game.gameEndedTime = datetime.datetime.now()
+        db.session.commit()
+        time = game.gameEndedTime - game.gameStartedTime
+        for t in teams:
+            if t == team:
+                break
+            else:
+                classement += 1
+        ret = dict()
+        ret['score'] = team.score
+        ret['totalTeams'] = len(teams)
+        ret['classement'] = classement
+        ret['time'] = str(datetime.timedelta(seconds=time.seconds))
+        ret = json.dumps(ret)
+        print ret
+        response = make_response(
+            ret, 200, {'Content-Type': "application/json"})
+    else:
+        response = make_response(
+            "TEAM_INVALID", 403, {'Content-Type': "application/json"})
     return response
 
 # refreshing position in DB
@@ -502,30 +611,48 @@ def refreshpos():
         json_handle = json.loads(request.data)
     except (ValueError, KeyError, TypeError):
         print "JSON format error"
-    player = Player.query.filter_by(
-        pseudonyme=json_handle['pseudonyme']).first_or_404()
-    player.latitude = json_handle['latitude']
-    player.longitude = json_handle['longitude']
-    db.session.commit()
-    ret = dict()
-    ret['answer'] = True
-    payload = jsonify(ret)
-    response = make_response(payload, 200, {'Content-Type': "application/json"})
+    game = Game.query.filter_by(PlayerCode=json_handle['playercode']).first()
+    if game:
+        team = Team.query.filter_by(name=json_handle['nameTeam'])
+        if team:
+            player = Player.query.filter_by(
+                pseudonyme=json_handle['namePlayer']).first_or_404()
+            player.latitude = json_handle['latitude']
+            player.longitude = json_handle['longitude']
+            db.session.commit()
+            ret = dict()
+            ret['answer'] = True
+            payload = jsonify(ret)
+            x = 200
+        else:
+            x = 403
+            payload = "TEAM_INVALID"
+    else:
+        x = 403
+        payload = "GAME_DOESNT_EXIST"
+    response = make_response(
+        payload, x, {'Content-Type': "application/json"})
     return response
 
 # get all teams informations player side
 
 
-@app.route("/<playercode>/teams", methods=["GET"])
-def teams(playercode):
-    if Game.query.filter_by(PlayerCode=playercode).first():
-        game = Game.query.filter_by(PlayerCode=playercode).first()
+@app.route("/<code>/teams", methods=["GET"])
+def teams(code):
+    game = Game.query.filter_by(PlayerCode=code).first()
+    gameAdm = Game.query.filter_by(GameMasterCode=code).first()
+    if game is not None:
         teams = Team.query.filter_by(Game_idGame=game.idGame).all()
         payload = teams_schema.jsonify(teams)
         response = make_response(
             payload, 200, {'Content-Type': "application/json"})
+    elif gameAdm is not None:
+        teams = Team.query.filter_by(Game_idGame=gameAdm.idGame).all()
+        payload = teams_schema.jsonify(teams)
+        response = make_response(
+            payload, 200, {'Content-Type': "application/json"})
     else:
-        response = make_response("Code invalide!", 410)
+        response = make_response("GAME_DOESNT_EXIST", 403)
     return response
 
 # get all teams informations admin side
@@ -534,23 +661,36 @@ def teams(playercode):
 @app.route("/<GameMasterCode>/getTeamsStats", methods=["GET"])
 def getTeamsStats(GameMasterCode):
     if check_adm(GameMasterCode):
-        game = Game.query.filter_by(GameMasterCode=json_handle['code']).first()
+        game = Game.query.filter_by(GameMasterCode=GameMasterCode).first()
+        settings = Settings.query.get(game.Settings_idSettings)
         teams = Team.query.filter_by(Game_idGame=game.idGame).all()
         data = ObjDict()
-        data['teams'] = []
+        data.game = json.loads(game_schema.jsonify(game).data)
+        data.settings = json.loads(setting_schema.jsonify(settings).data)
+        data.teams = []
         for team in teams:
-            ind = 0
-            players = team.players
-            ensemble = json.loads(team_schema.jsonify(team).data)
-            ensemble['players'] = []
-            if len(players) != 0:
-                ensemble['players'].append(json.loads(
-                    players_schema.jsonify(players).data))
-                data['teams'].append(ensemble)
+            test = json.loads(team_schema.jsonify(team).data)
+            test['players'] = []
+            for p in team.players:
+                test['players'].append(json.loads(
+                    player_schema.jsonify(p).data))
+            trip = Trip.query.filter_by(Team_idTeam=team.idTeam).first()
+            beacons = trip.beacons
+            test['trip'] = json.loads(trip_schema.jsonify(trip).data)
+            test['trip']['beacons'] = []
+            for beacon in beacons:
+                ensemble = json.loads(beacon_schema.jsonify(beacon).data)
+                if(game.GameMode != 1):
+                    riddle = Riddle.query.filter_by(
+                        idRiddle=beacon.Riddle_idRiddle).first()
+                    ensemble['Riddle'] = json.loads(
+                        riddle_schema.jsonify(riddle).data)
+                test['trip']['beacons'].append(ensemble)
+            data.teams.append(test)
         payload = data.dumps()
         x = 200
     else:
-        payload = "False"
+        payload = "ADMINCODE_INVALID"
         x = 403
     response = make_response(payload, x, {'Content-Type': "application/json"})
     return response
@@ -564,21 +704,24 @@ def BattleReady(GameMasterCode):
         game = Game.query.filter_by(
             GameMasterCode=GameMasterCode).first()
         game.isStarted = True
+        game.gameStartedTime = datetime.datetime.now()
         teams = Team.query.filter_by(Game_idGame=game.idGame).all()
         for team in teams:
             players = team.players
             for player in players:
                 data = dict()
                 data['startGameNow'] = True
-                r = firebase(player.idPlayer, data)
+                message = dict()
+                message['title']="The game has started !"
+                r = firebase(player.idPlayer, data, message)
                 print r.content
         db.session.commit()
         payload = "ok"
         x = 200
     else:
-        payload = "AdminCode invalide !"
+        payload = "ADMINCODE_INVALID"
         x = 403
-        response = make_response(payload, x)
+    response = make_response(payload, x)
     return response
 
 
@@ -594,6 +737,19 @@ def change_index():
     db.session.commit()
     return r
 
+
+@app.route('/subscribe', methods=["POST"])
+def subscribe():
+    try:
+        json_handle = json.loads(request.data)
+    except (ValueError, KeyError, TypeError):
+        print "JSON format error"
+    if json_handle['email'] is not None:
+        subscriber = Email(email=json_handle['email'], lastname=json_handle[
+            'lastname'], firstname=json_handle['firstname'])
+        db.session.add(subscriber)
+        db.session.commit()
+    return make_response("MAIL_OK", 200)
 # check if it a admin code
 
 
@@ -602,6 +758,7 @@ def check_adm(code):
         return True
     else:
         return False
+
 
 # main parameter of Flask Application
 if __name__ == "__main__":
